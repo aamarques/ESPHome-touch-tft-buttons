@@ -1,6 +1,6 @@
 # 📱 Monitor Garagem/Portão ESP32 - Documentação Técnica
 
-**Versão Atual:** v3.4 (Dezembro 2024)  
+**Versão Atual:** v3.4 (Junho 2025)  
 **Status:** ✅ Funcionando Perfeitamente  
 **Hardware:** NodeMCU-32S + TFT ILI9341 2.8" + XPT2046 Touch
 
@@ -639,7 +639,7 @@ Developer Tools → States → search "esp32-monitor-garagem"
 
 ---
 
-**Documentação atualizada em:** Dezembro 2024  
+**Documentação atualizada em:** Junho 2025  
 **Próxima revisão:** Quando houver nova versão do código
 
 ---
