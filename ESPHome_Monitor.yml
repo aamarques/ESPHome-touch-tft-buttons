@@ -1,0 +1,448 @@
+# ====================================
+# ESPHOME INTERFACE COMPLETA - v3.0
+# NodeMCU-32S + ILI9341 + Interface Garagem/Portão
+# ====================================
+# Base v2.4 funcionando + Interface completa
+# ✅ 2 Botões de controle (contatos secos)
+# ✅ 2 Sensores binários do Home Assistant  
+# ✅ Status WiFi, Data/Hora, Uptime
+# ✅ Layout tela única otimizado
+
+esphome:
+  name: esp32-monitor-garagem-v34
+  friendly_name: "Monitor Garagem Portão v3.4"
+  # Executa script de inicialização segura
+  on_boot:
+    priority: 600
+    then:
+      - script.execute: system_startup
+
+# Variáveis globais para efeito de botão pressionado + DEBOUNCE
+globals:
+  - id: garage_pressed
+    type: bool
+    initial_value: 'false'
+  - id: gate_pressed
+    type: bool
+    initial_value: 'false'
+  - id: last_touch_time
+    type: unsigned long
+    initial_value: '0'
+  - id: system_ready
+    type: bool
+    initial_value: 'false'
+
+esp32:
+  board: nodemcu-32s
+  framework:
+    type: esp-idf
+
+# Configuração WiFi + IP Estático
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # IP Estático configurado. Atualize os valores "x.x.x.x"
+  manual_ip:
+    static_ip: x.x.x.x
+    gateway: x.x.x.x
+    subnet: x.x.x.x
+    dns1: x.x.x.x         # IP do roteador (gateway)
+    dns2: 8.8.8.8          # DNS público do Google (backup)
+  ap:
+    ssid: "Monitor-Garagem Fallback"
+    password: !secret ap_password
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+captive_portal:
+
+# ====================================
+# SCRIPT DE INICIALIZAÇÃO SEGURA
+# ====================================
+script:
+  - id: system_startup
+    then:
+      - logger.log: "Iniciando sistema - touchscreen DESABILITADO"
+      - delay: 5s  # Aguarda 5 segundos após boot
+      - lambda: |-
+          id(system_ready) = true;
+          ESP_LOGI("startup", "Sistema PRONTO - touchscreen HABILITADO");
+
+# ====================================
+# CONFIGURAÇÃO DE TEMPO
+# ====================================
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: Europe/Lisbon
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+
+# ====================================
+# CONFIGURAÇÃO SPI (BASE FUNCIONANDO)
+# ====================================
+spi:
+  - id: tft_spi
+    clk_pin: GPIO18
+    mosi_pin: GPIO23
+    miso_pin: GPIO19
+
+# ====================================
+# TOUCHSCREEN PROTEGIDO CONTRA LOOPS
+# ====================================
+touchscreen:
+  platform: xpt2046
+  spi_id: tft_spi
+  id: my_touchscreen
+  cs_pin: GPIO16
+  interrupt_pin: GPIO17
+  update_interval: 100ms    # Mais lento para evitar spam
+  threshold: 600           # Mais alto para evitar toques fantasma
+  
+  calibration:
+    x_min: 280
+    x_max: 3860
+    y_min: 340
+    y_max: 3860
+  
+  # PROTEÇÕES CONTRA LOOP + DEBOUNCE
+  on_touch:
+    - lambda: |-
+        // === PROTEÇÕES CONTRA LOOP ===
+        
+        // 1. Sistema deve estar pronto (evita toques na inicialização)
+        if (!id(system_ready)) {
+          ESP_LOGI("touch", "Sistema ainda não está pronto, ignorando touch");
+          return;
+        }
+        
+        int touch_x = touch.x;
+        int touch_y = touch.y;
+        
+        // 2. Ignora coordenadas claramente inválidas
+        if ((touch_x == 0 && touch_y == 0) || 
+            (touch_x == 319 && touch_y == 239) ||
+            touch_x < 0 || touch_x > 319 ||
+            touch_y < 0 || touch_y > 239) {
+          ESP_LOGI("touch", "Coordenadas inválidas X:%d Y:%d - ignorando", touch_x, touch_y);
+          return;
+        }
+        
+        // 3. DEBOUNCE - evita múltiplos toques em sequência
+        unsigned long current_time = millis();
+        if (current_time - id(last_touch_time) < 1000) {  // 1 segundo de debounce
+          ESP_LOGI("touch", "Debounce ativo - ignorando touch");
+          return;
+        }
+        id(last_touch_time) = current_time;
+        
+        ESP_LOGI("touch", "Touch VÁLIDO detectado em X:%d Y:%d", touch_x, touch_y);
+        
+        // === ÁREAS EXATAS DOS RETÂNGULOS (X AND Y) ===
+        
+        // Botão Garagem (retângulo exato testado)
+        if (touch_x >= 80 && touch_x <= 120 && touch_y >= 130 && touch_y <= 233) {
+          ESP_LOGI("touch", "ACIONANDO GARAGEM - X:%d Y:%d", touch_x, touch_y);
+          id(garage_button).press();
+          id(garage_pressed) = true;
+          id(main_display).update();
+        }
+        // Botão Portão (retângulo exato testado)
+        else if (touch_x >= 78 && touch_x <= 120 && touch_y >= 7 && touch_y <= 117) {
+          ESP_LOGI("touch", "ACIONANDO PORTÃO - X:%d Y:%d", touch_x, touch_y);
+          id(gate_button).press();
+          id(gate_pressed) = true;
+          id(main_display).update();
+        }
+        else {
+          ESP_LOGI("touch", "Touch fora das áreas dos botões - X:%d Y:%d", touch_x, touch_y);
+        }
+
+# ====================================
+# CONTROLE BACKLIGHT
+# ====================================
+output:
+  - platform: gpio
+    pin: GPIO5
+    id: backlight_output
+
+# ====================================
+# DISPLAY ILI9341 (CONFIGURAÇÃO APROVADA)
+# ====================================
+display:
+  - platform: ili9xxx
+    model: ili9341
+    spi_id: tft_spi
+    id: main_display
+    
+    dc_pin: GPIO2
+    cs_pin: GPIO15
+    reset_pin: GPIO4
+    
+    # Configuração aprovada v2.4
+    rotation: 90
+    dimensions:
+      height: 320
+      width: 240
+    
+    invert_colors: false
+    color_order: BGR
+    data_rate: 20MHz
+    color_palette: 8BIT
+    
+    show_test_card: false
+    update_interval: 1s  # Mais rápido para interface
+    
+    # INTERFACE VERTICAL CORRIGIDA + COORDENADAS REAIS
+    lambda: |-
+      // === FUNDO ===
+      it.fill(Color(0, 0, 0));  // Fundo preto
+      
+      // Linha divisória central vertical
+      it.line(160, 10, 160, 200, Color(100, 100, 100));
+      
+      // === LADO ESQUERDO - GARAGEM ===
+      it.print(50, 15, id(font_title), Color(255, 255, 255), "GARAGEM");
+      
+      // Estado garagem - CENTRALIZADO
+      if (id(garage_door_sensor).state) {
+        it.print(55, 40, id(font_normal), Color(0, 255, 0), "ABERTA");
+      } else {
+        it.print(50, 40, id(font_normal), Color(255, 0, 0), "FECHADA");
+      }
+      
+      // Indicador visual garagem - SUBIDO 1 LINHA (Y=95)
+      Color garage_status_color = id(garage_door_sensor).state ? Color(0, 255, 0) : Color(255, 0, 0);
+      it.filled_circle(80, 95, 20, garage_status_color);
+      it.circle(80, 95, 20, Color(255, 255, 255));
+      
+      // Botão Garagem com EFEITO PRESSIONADO
+      Color garage_btn_color;
+      Color garage_text_color;
+      if (id(garage_pressed)) {
+        garage_btn_color = Color(255, 255, 255);  // Branco
+        garage_text_color = Color(0, 120, 200);   // Azul
+      } else {
+        garage_btn_color = Color(0, 120, 200);    // Azul
+        garage_text_color = Color(255, 255, 255); // Branco
+      }
+      it.filled_rectangle(5, 140, 150, 40, garage_btn_color);
+      it.rectangle(5, 140, 150, 40, Color(255, 255, 255));
+      it.print(52, 155, id(font_normal), garage_text_color, "ACIONAR");
+      
+      // === LADO DIREITO - PORTÃO ===
+      it.print(210, 15, id(font_title), Color(255, 255, 255), "PORTAO");
+      
+      // Estado portão - CENTRALIZADO
+      if (id(gate_door_sensor).state) {
+        it.print(215, 40, id(font_normal), Color(0, 255, 0), "ABERTO");
+      } else {
+        it.print(210, 40, id(font_normal), Color(255, 0, 0), "FECHADO");
+      }
+      
+      // Indicador visual portão - SUBIDO 1 LINHA (Y=95)
+      Color gate_status_color = id(gate_door_sensor).state ? Color(0, 255, 0) : Color(255, 0, 0);
+      it.filled_circle(240, 95, 20, gate_status_color);
+      it.circle(240, 95, 20, Color(255, 255, 255));
+      
+      // Botão Portão com EFEITO PRESSIONADO
+      Color gate_btn_color;  
+      Color gate_text_color;
+      if (id(gate_pressed)) {
+        gate_btn_color = Color(255, 255, 255);    // Branco
+        gate_text_color = Color(200, 120, 0);     // Laranja
+      } else {
+        gate_btn_color = Color(200, 120, 0);      // Laranja
+        gate_text_color = Color(255, 255, 255);   // Branco
+      }
+      it.filled_rectangle(165, 140, 150, 40, gate_btn_color);
+      it.rectangle(165, 140, 150, 40, Color(255, 255, 255));
+      it.print(207, 155, id(font_normal), gate_text_color, "ACIONAR");
+      
+      // === RODAPÉ COM STATUS DO SISTEMA ===
+      // Linha separadora
+      it.line(10, 200, 310, 200, Color(100, 100, 100));
+      
+      // WiFi Status (esquerda - mais centralizado)
+      if (id(wifi_connected).state) {
+        it.print(15, 215, id(font_small), Color(0, 255, 0), "WiFi:OK");
+      } else {
+        it.print(15, 215, id(font_small), Color(255, 0, 0), "WiFi:OFF");
+      }
+      
+      // Status do Sistema (indicador se touchscreen está ativo)
+      if (id(system_ready)) {
+        it.print(70, 215, id(font_small), Color(0, 255, 0), "Touch:ON");
+      } else {
+        it.print(70, 215, id(font_small), Color(255, 0, 0), "Touch:OFF");
+      }
+      
+      // Data e Hora (centro - melhor centralizado)
+      auto time_now = id(sntp_time).now();
+      if (time_now.is_valid()) {
+        it.strftime(140, 215, id(font_small), Color(255, 255, 0), 
+                   "%d/%m %H:%M", time_now);
+      } else {
+        it.print(140, 215, id(font_small), Color(255, 0, 0), "Sync...");
+      }
+      
+      // Uptime (direita - melhor distribuído)
+      float uptime_sec = id(uptime_sensor).state;
+      int uptime_days = (int)(uptime_sec / 86400);
+      int uptime_hours = (int)((uptime_sec - (uptime_days * 86400)) / 3600);
+      int uptime_minutes = (int)((uptime_sec - (uptime_days * 86400) - (uptime_hours * 3600)) / 60);
+      
+      it.printf(230, 215, id(font_small), Color(0, 255, 255), 
+               "Up:%dd%02d:%02d", uptime_days, uptime_hours, uptime_minutes);
+
+# ====================================
+# FONTES
+# ====================================
+font:
+  - file: "gfonts://Roboto"
+    id: font_title
+    size: 14
+    
+  - file: "gfonts://Roboto"
+    id: font_normal
+    size: 12
+    
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 10
+
+# ====================================
+# CONTROLE BACKLIGHT
+# ====================================
+light:
+  - platform: binary
+    name: "Display Backlight"
+    id: backlight_light
+    output: backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+
+# ====================================
+# SENSORES HOME ASSISTANT
+# ====================================
+binary_sensor:
+  # Status WiFi
+  - platform: status
+    name: "Status Online"
+    id: wifi_connected
+    
+  # Sensor Garagem
+  - platform: homeassistant
+    name: "Sensor Porta Garagem"
+    id: garage_door_sensor
+    entity_id: binary_sensor.<seu_sensor_binario>
+    
+  # Sensor Portão  
+  - platform: homeassistant
+    name: "Sensor Portão"
+    id: gate_door_sensor
+    entity_id: binary_sensor.<seu_sensor_binario>
+
+# ====================================
+# SENSORES SISTEMA
+# ====================================
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+    
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_sensor
+    update_interval: 60s
+
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      id: IP
+
+# ====================================
+# BOTÕES DE CONTROLE COM EFEITO VISUAL
+# ====================================
+button:
+  - platform: restart
+    name: "Restart ESP32"
+    id: restart_button
+    
+  # Botão Garagem - Comando via Home Assistant + Efeito Visual
+  - platform: template
+    name: "Toggle Garagem"
+    id: garage_button
+    on_press:
+      - logger.log: "Enviando comando para Garagem..."
+      - homeassistant.service:
+          service: switch.toggle
+          data:
+            entity_id: switch.<seu_switch>
+      - logger.log: "Comando Garagem enviado!"
+      # Reset do efeito visual após 500ms
+      - delay: 500ms
+      - lambda: |-
+          id(garage_pressed) = false;
+          id(main_display).update();
+    
+  # Botão Portão - Comando via Home Assistant + Efeito Visual
+  - platform: template
+    name: "Toggle Portão"
+    id: gate_button
+    on_press:
+      - logger.log: "Enviando comando para Portão..."
+      - homeassistant.service:
+          service: switch.toggle
+          data:
+            entity_id: switch.<seu_switch>
+      - logger.log: "Comando Portão enviado!"
+      # Reset do efeito visual após 500ms
+      - delay: 500ms
+      - lambda: |-
+          id(gate_pressed) = false;
+          id(main_display).update();
+
+# ====================================
+# INTERFACE PROTEGIDA v3.4 - ANTI-LOOP
+# ====================================
+# 🚨 CORREÇÃO CRÍTICA - PROTEÇÃO CONTRA LOOPS:
+# ✅ Debounce de 1 segundo entre toques
+# ✅ Sistema só aceita toques após 5s da inicialização  
+# ✅ Threshold aumentado (400→600) contra toques fantasma
+# ✅ Update interval mais lento (50ms→100ms)
+# ✅ Filtros aprimorados de coordenadas inválidas
+# ✅ Log detalhado para debug de toques válidos/inválidos
+#
+# PROTEÇÕES IMPLEMENTADAS:
+# 1. system_ready = false durante inicialização (5s)
+# 2. Debounce de 1000ms entre toques válidos
+# 3. Filtro rigoroso de coordenadas inválidas
+# 4. Threshold 600 (vs 400 anterior)
+# 5. Update interval 100ms (vs 50ms anterior)
+# 6. Log detalhado de todos os filtros aplicados
+#
+# COORDENADAS EXATAS DOS BOTÕES:
+# - Garagem: X=80-120, Y=130-233 (baseado nos testes)
+# - Portão: X=78-120, Y=7-117 (baseado nos testes)
+#
+# SEQUÊNCIA DE INICIALIZAÇÃO:
+# 1. Boot → system_ready = false
+# 2. 5 segundos → system_ready = true
+# 3. Touchscreen habilitado com proteções
+#
+# LOOP PREVENTION:
+# ✅ Sem toques durante boot (5s)
+# ✅ Sem toques múltiplos (debounce 1s)
+# ✅ Sem toques fantasma (threshold 600)
+# ✅ Sem coordenadas inválidas (filtros rigorosos)
